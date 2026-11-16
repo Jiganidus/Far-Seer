@@ -9,8 +9,8 @@ const $ = (id) => document.getElementById(id);
 // ---------- Settings you can tune ----------
 const CFG = {
   cellDeg: 0.0005,        // reveal grid (~55 m)
-  revealM: 200,           // radius of map revealed around each point
-  maxAcc: 80,             // ignore GPS fixes less accurate than this (m)
+  revealM: 300,           // radius of map revealed around each point (set in Settings)
+  maxAcc: 1500,           // ignore GPS fixes less accurate than this (m)
   maxGapMs: 5 * 60e3,     // gaps longer than this don't count as time spent
   maxSpeed: 70,           // m/s; faster than this (flights) reveals points, not lines
   geocodeEveryM: 350,     // check which suburb/town you're in every N metres
@@ -75,8 +75,9 @@ function toast(msg, ms = 3200) {
 }
 
 // ---------- Options (remembered on this device) ----------
-const opt = { voice: true, sound: true, wake: true, theme: 'auto' };
+const opt = { voice: true, sound: true, wake: true, theme: 'auto', reveal: 300 };
 try { Object.assign(opt, JSON.parse(localStorage.getItem('tm-opt') || '{}')); } catch (e) {}
+CFG.revealM = +opt.reveal || 300;
 const saveOpt = () => { try { localStorage.setItem('tm-opt', JSON.stringify(opt)); } catch (e) {} };
 
 // ---------- Storage (IndexedDB) ----------
@@ -148,13 +149,14 @@ setInterval(() => {
 const saveMeta = () => dbPut('meta', { k: 'meta', ...S.meta });
 
 // ---------- Map ----------
-const map = L.map('map', { zoomControl: false, attributionControl: false, zoomAnimation: false, worldCopyJump: true, minZoom: 2, maxZoom: 19 })
+const map = L.map('map', { zoomControl: false, attributionControl: true, zoomAnimation: false, worldCopyJump: true, minZoom: 2, maxZoom: 19 })
   .setView([-33.8688, 151.2093], 12);
 let tiles = null;
 function setTiles(dark) {
   if (tiles) map.removeLayer(tiles);
-  tiles = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`, {
-    subdomains: 'abcd', maxZoom: 19, detectRetina: false,
+  // OpenStreetMap's own tiles (no key needed); the matte light/dark look is a CSS filter in style.css
+  tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
 }
 const meMarker = L.marker([0, 0], { icon: L.divIcon({ className: '', html: '<div class="me"></div>', iconSize: [18, 18] }), interactive: false, zIndexOffset: 1000 });
@@ -221,22 +223,34 @@ function drawFog() {
   fctx.fillStyle = hp;
   fctx.fillRect(0, 0, fog.width, fog.height);
 
+  // Revealed areas are painted on a low-res mask (soft edges anyway), then cut out of the fog.
+  // Keeps brush sizes small even with a 1 km radius zoomed right in.
   const c = map.getCenter(), z = map.getZoom();
   const mpp = 40075016.686 * Math.cos(rad(c.lat)) / Math.pow(2, z + 8);
-  const rDev = Math.max(1.5, CFG.revealM / mpp) * dpr;
-  const br = getBrush(rDev), half = br.width / 2;
+  const rCss = Math.max(1.5, CFG.revealM / mpp);
+  const k = Math.max(0.05, Math.min(dpr, 160 / rCss));   // mask pixels per CSS pixel
+  const mw = Math.max(1, Math.ceil(w * k)), mh = Math.max(1, Math.ceil(h * k));
+  if (mask.width !== mw || mask.height !== mh) { mask.width = mw; mask.height = mh; }
+  mctx.setTransform(1, 0, 0, 1, 0, 0);
+  mctx.globalCompositeOperation = 'source-over';
+  mctx.clearRect(0, 0, mw, mh);
+  const br = getBrush(rCss * k), half = br.width / 2;
   const b = map.getBounds();
-  const padLat = CFG.revealM / 111000 * 1.5, padLng = padLat / Math.max(0.2, Math.cos(rad(c.lat)));
+  const padLat = CFG.revealM / 111000 * 1.2, padLng = padLat / Math.max(0.2, Math.cos(rad(c.lat)));
   const s = b.getSouth() - padLat, n = b.getNorth() + padLat, wl = b.getWest() - padLng, el = b.getEast() + padLng;
-  fctx.globalCompositeOperation = 'destination-out';
   const pts = S.pts;
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
     if (p[0] < s || p[0] > n || p[1] < wl || p[1] > el) continue;
     const pt = map.latLngToContainerPoint(p);
-    fctx.drawImage(br, pt.x * dpr - half, pt.y * dpr - half);
+    mctx.drawImage(br, pt.x * k - half, pt.y * k - half);
   }
+  fctx.globalCompositeOperation = 'destination-out';
+  fctx.imageSmoothingEnabled = true;
+  fctx.drawImage(mask, 0, 0, mw, mh, 0, 0, fog.width, fog.height);
 }
+const mask = document.createElement('canvas');
+const mctx = mask.getContext('2d');
 map.on('move zoom resize viewreset', requestDraw);
 window.addEventListener('resize', requestDraw);
 
@@ -466,17 +480,19 @@ function handleFix(f) {
   if (!map.hasLayer(meMarker)) meMarker.addTo(map);
   meMarker.setLatLng(ll);
   if (follow) {
-    if (!last) map.setView(ll, Math.max(map.getZoom(), 15));
+    if (!last) map.setView(ll, 15);
     else map.panTo(ll, { animate: false });
   }
-  if (f.acc > CFG.maxAcc) { updateChip('Waiting for a clearer GPS signal…'); return; }
+  if (f.acc > CFG.maxAcc) { updateChip(`Weak GPS signal (±${Math.round(f.acc)} m). Try near a window or outside`); return; }
+  // Rough fix (typical indoors): still work out which suburb you're in, but don't reveal the wrong patch of map
+  if (f.acc > Math.max(100, CFG.revealM)) { maybeGeocode(f); updateChip(`Rough GPS (±${Math.round(f.acc)} m). Map reveals once it sharpens`); return; }
   const prev = last;
   last = f;
   if (prev) {
     const d = dist(prev, f), dt = f.t - prev.t;
     if (dt > 0 && dt < CFG.maxGapMs && d / (dt / 1000) < CFG.maxSpeed) {
       revealLine(prev, f);
-      if (d > 4) S.meta.distM += d;
+      if (d > Math.max(4, f.acc)) S.meta.distM += d; // ignore GPS wobble
       credit(dt, f);
       if (f.speed == null) f.speed = d / (dt / 1000);
     } else addCell(f.lat, f.lng);
@@ -561,7 +577,7 @@ $('exploreBtn').onclick = () => {
 };
 $('locateBtn').onclick = () => {
   follow = true;
-  if (last) map.setView([last.lat, last.lng], Math.max(map.getZoom(), 15));
+  if (last) map.setView([last.lat, last.lng], Math.max(map.getZoom(), 14));
   else if (!exploring) toast('Tap Explore to find your location');
 };
 
@@ -734,6 +750,8 @@ $('optVoice').onchange = (e) => { opt.voice = e.target.checked; if (!opt.voice) 
 $('optSound').onchange = (e) => { opt.sound = e.target.checked; saveOpt(); };
 $('optWake').onchange = (e) => { opt.wake = e.target.checked; saveOpt(); if (!opt.wake) { wakeLock?.release?.(); wakeLock = null; } else if (exploring) lockScreen(); };
 $('optTheme').onchange = (e) => { opt.theme = e.target.value; saveOpt(); applyTheme(); };
+$('optReveal').value = String(CFG.revealM);
+$('optReveal').onchange = (e) => { opt.reveal = +e.target.value; CFG.revealM = opt.reveal; saveOpt(); requestDraw(); };
 
 const blobToDataURL = (b) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
 $('exportBtn').onclick = async () => {

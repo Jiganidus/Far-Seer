@@ -9,6 +9,6 @@ A fog-of-war travel log. The map stays covered until you've been there.
 
 All data stays on the phone (IndexedDB). Back up from Settings.
 
-Data: map tiles © OpenStreetMap contributors © CARTO · place names via Nominatim · stories from Wikipedia (CC BY-SA).
+Data: map tiles © OpenStreetMap contributors · place names via Nominatim · stories from Wikipedia (CC BY-SA).
 
 Prototype limits: as a web app it only tracks while open on screen.

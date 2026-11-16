@@ -38,7 +38,13 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 #map { position: fixed; inset: 0; background: var(--bg); }
 #fog { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 450; }
 .leaflet-container { background: var(--bg); font: inherit; }
-.leaflet-control-attribution { display: none; }
+.leaflet-bottom.leaflet-right { bottom: calc(var(--safe-b) + 84px); }
+.leaflet-control-attribution { font-size: 10px; background: color-mix(in srgb, var(--surface) 75%, transparent) !important; color: var(--muted); border-radius: 6px 0 0 6px; }
+.leaflet-control-attribution a { color: var(--muted); }
+.leaflet-control-attribution .leaflet-attribution-flag { display: none !important; }
+/* Matte look for the OpenStreetMap tiles */
+.leaflet-tile-pane { filter: grayscale(.75) sepia(.08) contrast(.92) brightness(1.04); }
+:root[data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(185deg) grayscale(.7) brightness(.82) contrast(.9); }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); border-radius: 12px; }
 .leaflet-popup-content { margin: 12px; }
 .leaflet-pane.leaflet-marker-pane, .leaflet-pane.leaflet-popup-pane { z-index: 600; }
@@ -55,7 +61,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .dot.on { background: var(--green); box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 25%, transparent); }
 .icon-btn { width: 46px; height: 46px; flex: none; display: grid; place-items: center; border-radius: 14px;
   background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
-.locate { position: fixed; z-index: 800; right: 10px; bottom: calc(var(--safe-b) + 96px); }
+.locate { position: fixed; z-index: 800; right: 10px; bottom: calc(var(--safe-b) + 108px); }
 
 /* Bottom */
 .bottom { position: fixed; z-index: 800; left: 10px; right: 10px; bottom: calc(var(--safe-b) + 12px); display: flex; align-items: center; justify-content: space-between;
