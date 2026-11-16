@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16181b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Travel Map</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map" aria-label="Map"></div>
+<canvas id="fog" aria-hidden="true"></canvas>
+
+<header class="top">
+  <button class="chip area" id="areaChip" aria-live="polite">
+    <span class="dot" id="liveDot"></span>
+    <span class="area-text"><b id="areaName">Not exploring yet</b><small id="areaSub">Tap Explore to start revealing the map</small></span>
+  </button>
+  <button class="icon-btn" id="settingsBtn" aria-label="Settings">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
+</header>
+
+<div class="welcome" id="welcome" hidden>
+  <div class="welcome-kicker" id="welcomeKicker">New area discovered</div>
+  <div class="welcome-title" id="welcomeTitle"></div>
+  <p class="welcome-body" id="welcomeBody"></p>
+  <div class="welcome-actions">
+    <a id="welcomeLink" href="#" target="_blank" rel="noopener" hidden>Read more</a>
+    <button id="welcomeClose" class="text-btn">Dismiss</button>
+  </div>
+</div>
+
+<button class="icon-btn locate" id="locateBtn" aria-label="Centre on me">
+  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+</button>
+
+<nav class="bottom">
+  <button class="nav-btn" id="logBtn" aria-label="Travel log">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Log</span>
+  </button>
+  <button class="explore" id="exploreBtn"><span class="pulse"></span><span id="exploreLabel">Explore</span></button>
+  <label class="nav-btn" aria-label="Log a photo">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span>Photo</span>
+    <input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
+  </label>
+</nav>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<!-- Log sheet -->
+<section class="sheet" id="logSheet" hidden>
+  <div class="sheet-head">
+    <h2>Travel log</h2>
+    <button class="text-btn" data-close>Close</button>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="tabs" role="tablist">
+    <button role="tab" class="tab on" data-tab="areas">Places</button>
+    <button role="tab" class="tab" data-tab="pois">Sights</button>
+    <button role="tab" class="tab" data-tab="photos">Photos</button>
+  </div>
+  <div class="tab-body" id="tabBody"></div>
+</section>
+
+<!-- Settings sheet -->
+<section class="sheet" id="settingsSheet" hidden>
+  <div class="sheet-head">
+    <h2>Settings</h2>
+    <button class="text-btn" data-close>Close</button>
+  </div>
+  <div class="setting"><span>Spoken guide</span><input type="checkbox" class="switch" id="optVoice" checked></div>
+  <div class="setting"><span>Sound effects</span><input type="checkbox" class="switch" id="optSound" checked></div>
+  <div class="setting"><span>Keep screen on while exploring</span><input type="checkbox" class="switch" id="optWake" checked></div>
+  <div class="setting"><span>Theme</span>
+    <select id="optTheme"><option value="auto">Match phone</option><option value="light">Light</option><option value="dark">Dark</option></select>
+  </div>
+  <h3>Try it</h3>
+  <button class="wide-btn" id="demoBtn">Demo drive through Sydney</button>
+  <p class="hint">Simulates a drive from Circular Quay to Newtown so you can see the fog lift and hear the guide, without leaving the couch. Demo data is kept separate and cleared when it ends.</p>
+  <h3>Your data</h3>
+  <p class="hint">Everything is stored only on this phone, in this browser. Back it up now and then.</p>
+  <div class="row">
+    <button class="wide-btn" id="exportBtn">Back up</button>
+    <label class="wide-btn">Restore<input type="file" id="importInput" accept="application/json" hidden></label>
+  </div>
+  <button class="wide-btn danger" id="clearBtn">Erase all data</button>
+  <p class="hint small">Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>. Place names from Nominatim. Stories from Wikipedia (CC BY-SA).</p>
+</section>
+
+<!-- Photo form -->
+<section class="sheet" id="photoSheet" hidden>
+  <div class="sheet-head">
+    <h2>Log a photo</h2>
+    <button class="text-btn" data-close>Cancel</button>
+  </div>
+  <img id="photoPreview" class="photo-preview" alt="">
+  <div class="cats" id="photoCats"></div>
+  <input type="text" id="photoNote" class="field" placeholder="What did you see? (optional)" maxlength="140">
+  <button class="wide-btn primary" id="photoSave">Save to map</button>
+</section>
+
+<div class="confirm" id="confirm" hidden>
+  <div class="confirm-box">
+    <p id="confirmText"></p>
+    <div class="row">
+      <button class="wide-btn" id="confirmNo">Cancel</button>
+      <button class="wide-btn danger" id="confirmYes">Erase</button>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
