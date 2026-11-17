@@ -124,7 +124,7 @@ function dbClearAll() {
 }
 
 // ---------- App state ----------
-const freshState = () => ({ cells: new Set(), pts: [], areas: new Map(), pois: new Map(), photos: new Map(), meta: { distM: 0, lastLat: null, lastLng: null } });
+const freshState = () => ({ cells: new Set(), pts: [], areas: new Map(), regions: new Map(), pois: new Map(), photos: new Map(), meta: { distM: 0, lastLat: null, lastLng: null } });
 let S = freshState();
 let realS = null;          // holds the real data while a demo runs
 let demo = false;
@@ -245,6 +245,32 @@ function drawFog() {
     const pt = map.latLngToContainerPoint(p);
     mctx.drawImage(br, pt.x * k - half, pt.y * k - half);
   }
+  // Discovered suburbs: a wide circle of lifted fog around each one
+  const now = performance.now();
+  let animating = false;
+  for (const a of S.areas.values()) {
+    const u = a.unlock;
+    if (!u) continue;
+    const uPadLat = u.r / 111000, uPadLng = uPadLat / Math.max(0.2, Math.cos(rad(u.lat)));
+    if (u.lat + uPadLat < b.getSouth() || u.lat - uPadLat > b.getNorth() || u.lng + uPadLng < b.getWest() || u.lng - uPadLng > b.getEast()) continue;
+    let grow = 1;
+    const st = unlockAnims.get(a.key);
+    if (st != null) {
+      const t = Math.min(1, (now - st) / 1800);
+      grow = 1 - Math.pow(1 - t, 3);
+      if (t < 1) animating = true; else unlockAnims.delete(a.key);
+    }
+    const ur = Math.max(0.5, (u.r / mpp) * k * grow);
+    const pt = map.latLngToContainerPoint([u.lat, u.lng]);
+    const x = pt.x * k, y = pt.y * k;
+    const g = mctx.createRadialGradient(x, y, 0, x, y, ur);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(0.72, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    mctx.fillStyle = g;
+    mctx.beginPath(); mctx.arc(x, y, ur, 0, Math.PI * 2); mctx.fill();
+  }
+  if (animating) requestDraw();
   fctx.globalCompositeOperation = 'destination-out';
   fctx.imageSmoothingEnabled = true;
   fctx.drawImage(mask, 0, 0, mw, mh, 0, 0, fog.width, fog.height);
@@ -281,6 +307,28 @@ function chime(kind) {
     o.connect(g).connect(actx.destination);
     o.start(t); o.stop(t + 1);
   });
+}
+// Discovery fanfare: rising arpeggio then a held chord. Bigger for bigger places.
+function fanfare(level) {
+  if (!opt.sound || !actx) return;
+  const t0 = actx.currentTime + 0.05;
+  const tone = (fq, at, dur, gain, type = 'triangle') => {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = fq;
+    g.gain.setValueAtTime(0.0001, t0 + at);
+    g.gain.linearRampToValueAtTime(gain, t0 + at + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+    o.connect(g).connect(actx.destination);
+    o.start(t0 + at); o.stop(t0 + at + dur + 0.05);
+  };
+  const big = level === 'country' || level === 'state';
+  const run = big ? [392, 523.25, 659.25, 783.99, 1046.5] : [523.25, 659.25, 783.99, 1046.5];
+  run.forEach((fq, i) => tone(fq, i * 0.11, 0.5, 0.12));
+  const at = run.length * 0.11;
+  const chord = big ? [261.63, 392, 523.25, 659.25, 783.99] : [392, 523.25, 659.25, 783.99];
+  chord.forEach((fq) => { tone(fq, at, big ? 2.6 : 1.8, 0.07); tone(fq * 2, at, big ? 2.2 : 1.4, 0.015, 'sine'); });
+  tone(130.81, at, big ? 2.8 : 1.6, big ? 0.12 : 0.07, 'sine'); // low swell
+  [1567.98, 2093, 2637].forEach((fq, i) => tone(fq, at + 0.15 + i * 0.09, 0.6, 0.02, 'sine')); // sparkle
 }
 let voice = null;
 function pickVoice() {
@@ -350,46 +398,125 @@ async function maybeGeocode(f) {
     const a = j.address || {};
     const name = a.suburb || a.town || a.village || a.city_district || a.city || a.hamlet || a.municipality || a.county || j.name;
     if (!name) return;
-    const area = { name, state: a.state || a.region || '', country: a.country || '' };
+    let city = a.city || a.municipality || a.county || a.state_district || '';
+    city = city.replace(/^(City|Municipality|Shire|Town) of /i, '').replace(/ (City |Shire |Municipal |Regional )?Council$/i, '').trim();
+    if (city.toLowerCase() === name.toLowerCase()) city = '';
+    const area = { name, city, state: a.state || a.region || '', country: a.country || '' };
     area.key = [area.name, area.state, area.country].join('|').toLowerCase();
-    const wikiTag = j.name === name ? j.extratags?.wikipedia : null;
+    const isSelf = j.name === name;
+    const wikiTag = isSelf ? j.extratags?.wikipedia : null;
+    area.unlock = unlockFor(isSelf ? j : null, last || f);
     enterArea(area, wikiTag, last || f);
   } catch (e) {
     geoBackoffUntil = Date.now() + 15000;
   } finally { geoBusy = false; }
 }
 
+// Circle of fog lifted when a suburb is discovered: covers the suburb's own extent
+// (from its OpenStreetMap bounding box), clamped to 0.7–3 km. Falls back to 1 km around you.
+function unlockFor(obj, f) {
+  const bb = obj?.boundingbox?.map(Number);
+  if (bb && bb.length === 4 && isFinite(bb[0])) {
+    const c = { lat: +obj.lat, lng: +obj.lon };
+    const r = Math.max(dist(c, { lat: bb[0], lng: c.lng }), dist(c, { lat: bb[1], lng: c.lng }),
+                       dist(c, { lat: c.lat, lng: bb[2] }), dist(c, { lat: c.lat, lng: bb[3] }));
+    return { lat: c.lat, lng: c.lng, r: Math.round(Math.min(3000, Math.max(700, r * 1.05))) };
+  }
+  return { lat: f.lat, lng: f.lng, r: 1000 };
+}
+const LEVELS = ['country', 'state', 'city', 'suburb'];
+const LEVEL_LABEL = { country: 'Country', state: 'State', city: 'City', suburb: 'Suburb' };
+function regionChain(area) {
+  const out = [];
+  if (area.country) out.push({ level: 'country', name: area.country, key: 'R|country|' + area.country.toLowerCase() });
+  if (area.state) out.push({ level: 'state', name: area.state, key: 'R|state|' + [area.state, area.country].join('|').toLowerCase() });
+  if (area.city) out.push({ level: 'city', name: area.city, key: 'R|city|' + [area.city, area.state, area.country].join('|').toLowerCase() });
+  return out;
+}
+let curRegionKeys = [];
+
 async function enterArea(area, wikiTag, f) {
   if (area.key === curAreaKey) return;
   curAreaKey = area.key;
+  // higher levels: country, state, city
+  const newRegions = [];
+  curRegionKeys = [];
+  for (const r of regionChain(area)) {
+    curRegionKeys.push(r.key);
+    let rr = S.regions.get(r.key);
+    if (!rr) {
+      rr = { ...r, firstSeen: f.t, lastSeen: f.t, ms: 0, country: area.country, state: r.level === 'country' ? '' : area.state };
+      S.regions.set(r.key, rr);
+      newRegions.push(rr);
+    }
+    rr.lastSeen = f.t;
+    dbPut('areas', rr);
+  }
+  // the suburb itself
   let rec = S.areas.get(area.key);
   const isNew = !rec;
-  const newCountry = isNew && area.country && ![...S.areas.values()].some((r) => r.country === area.country);
-  const newState = isNew && area.state && ![...S.areas.values()].some((r) => r.state === area.state);
   if (isNew) {
-    rec = { ...area, lat: f.lat, lng: f.lng, firstSeen: f.t, lastSeen: f.t, ms: 0, visits: 0 };
+    rec = { ...area, level: 'suburb', lat: area.unlock.lat, lng: area.unlock.lng, firstSeen: f.t, lastSeen: f.t, ms: 0, visits: 0 };
     S.areas.set(area.key, rec);
   }
+  if (!rec.unlock && area.unlock) rec.unlock = area.unlock;
+  if (!rec.city && area.city) rec.city = area.city;
   rec.visits++;
   rec.lastSeen = f.t;
   dbPut('areas', rec);
   updateChip();
 
-  const kicker = newCountry ? `New country · ${area.country}` : newState ? `New state · ${area.state}` : isNew ? 'New area discovered' : 'Welcome back';
-  if (!isNew && narratedThisSession.has(area.key)) { toast(`Back in ${area.name}`); return; }
+  if (!isNew && !newRegions.length) {
+    if (narratedThisSession.has(area.key)) { toast(`Back in ${area.name}`); return; }
+  }
   narratedThisSession.add(area.key);
-  chime('area');
-  showCard({ kicker, title: area.name, body: rec.story || 'Looking up the local story…', url: rec.url });
+
+  let delay = 0;
+  if (isNew || newRegions.length) {
+    // the big moment: banner + fanfare + fog lifting around the suburb
+    const top = newRegions[0]?.level || 'suburb';
+    fanfare(top);
+    showDiscovery({
+      kicker: isNew ? 'Suburb discovered' : `${LEVEL_LABEL[top]} discovered`,
+      title: isNew ? area.name : newRegions[newRegions.length - 1].name,
+      sub: [area.city, area.state].filter(Boolean).join(' · '),
+      extra: newRegions.filter((r) => !(r.level === 'city' && !isNew)).map((r) => `New ${r.level} · ${r.name}`),
+    });
+    if (isNew) startUnlockAnim(area.key);
+    delay = 4200;
+  } else chime('area');
 
   if (!rec.story) {
-    const s = await areaStory(area, wikiTag);
-    if (s) { rec.story = s.story; rec.url = s.url; rec.wikiTitle = s.title; dbPut('areas', rec); }
+    const st = await areaStory(area, wikiTag);
+    if (st) { rec.story = st.story; rec.url = st.url; rec.wikiTitle = st.title; dbPut('areas', rec); }
   }
-  if (curAreaKey !== area.key) return; // moved on already
-  showCard({ kicker, title: area.name, body: rec.story || `${area.name}${area.state ? ', ' + area.state : ''}.`, url: rec.url });
-  const lead = isNew ? `Welcome to ${area.name}.` : `Welcome back to ${area.name}.`;
-  speak(`${lead} ${rec.story ? sentences(rec.story, 2) : ''}`, 'high');
+  setTimeout(() => {
+    if (curAreaKey !== area.key) return; // moved on already
+    showCard({ kicker: isNew ? 'About this place' : 'Welcome back', title: area.name, body: rec.story || `${area.name}${area.state ? ', ' + area.state : ''}.`, url: rec.url });
+  }, delay);
+  const big = newRegions.filter((r) => r.level !== 'city').map((r) => `Welcome to ${r.name}!`).join(' ');
+  const lead = isNew ? `You've discovered ${area.name}.` : `Welcome back to ${area.name}.`;
+  setTimeout(() => speak(`${big} ${lead} ${rec.story ? sentences(rec.story, 2) : ''}`, 'high'), isNew || newRegions.length ? 1600 : 0);
 }
+
+// ---------- Discovery banner ----------
+let discTimer;
+function showDiscovery({ kicker, title, sub, extra }) {
+  const el = $('discover');
+  $('discKicker').textContent = kicker;
+  $('discTitle').textContent = title;
+  $('discSub').textContent = sub || '';
+  $('discExtra').innerHTML = (extra || []).map((x) => `<span>${esc(x)}</span>`).join('');
+  $('welcome').hidden = true;
+  el.hidden = false;
+  el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
+  clearTimeout(discTimer);
+  discTimer = setTimeout(() => { el.hidden = true; el.classList.remove('show'); }, 4600);
+}
+
+// Fog lifting outward over ~1.8 s when a suburb is discovered
+const unlockAnims = new Map();
+function startUnlockAnim(key) { unlockAnims.set(key, performance.now()); requestDraw(); }
 
 // ---------- Sights (Wikipedia places nearby) ----------
 let nearby = [], lastPoiPt = null, poiBusy = false, lastAnnounce = -Infinity;
@@ -470,6 +597,10 @@ function credit(dt, f) {
     if (after !== before) { chime('tier'); toast(`${a.name}: now “${after}”`, 4500); }
     if (Math.random() < 0.1) dbPut('areas', a);
   }
+  for (const k of curRegionKeys) {
+    const r = S.regions.get(k);
+    if (r) { r.ms += dt; r.lastSeen = f.t; if (Math.random() < 0.05) dbPut('areas', r); }
+  }
   for (const id of nearNow) {
     const p = S.pois.get(id);
     if (p) { p.ms += dt; if (Math.random() < 0.1) dbPut('pois', p); }
@@ -510,12 +641,12 @@ function updateChip(msg) {
   const a = S.areas.get(curAreaKey);
   $('liveDot').classList.toggle('on', exploring || demo);
   if (!(exploring || demo)) {
-    $('areaName').textContent = S.areas.size ? `${S.areas.size} places discovered` : 'Not exploring yet';
+    $('areaName').textContent = S.areas.size ? `${S.areas.size} suburb${S.areas.size === 1 ? '' : 's'} discovered` : 'Not exploring yet';
     $('areaSub').textContent = 'Tap Explore to start revealing the map';
     return;
   }
   $('areaName').textContent = a ? a.name : 'Finding where you are…';
-  $('areaSub').textContent = msg || (a ? `${tierOf(a.ms).name} · ${fmtDur(a.ms)} here · ${(S.meta.distM / 1000).toFixed(1)} km explored` : 'Getting your location');
+  $('areaSub').textContent = msg || (a ? `${tierOf(a.ms).name} · ${fmtDur(a.ms)} here${a.city ? ' · ' + a.city : ''}` : 'Getting your location');
 }
 
 // ---------- Explore on/off ----------
@@ -562,13 +693,13 @@ function startExplore() {
 function stopExplore() {
   exploring = false;
   if (watchId != null) navigator.geolocation.clearWatch(watchId);
-  watchId = null; last = null; curAreaKey = null;
+  watchId = null; last = null; curAreaKey = null; curRegionKeys = [];
   wakeLock?.release?.(); wakeLock = null;
   flushAll(); saveMeta();
   setExploreUI();
 }
 function flushAll() {
-  dbPutMany('areas', [...S.areas.values()]);
+  dbPutMany('areas', [...S.areas.values(), ...S.regions.values()]);
   dbPutMany('pois', [...S.pois.values()]);
 }
 $('exploreBtn').onclick = () => {
@@ -594,7 +725,7 @@ function startDemo() {
   if (pendingCells.length) { dbPutMany('cells', pendingCells); pendingCells = []; }
   flushAll(); saveMeta();
   realS = S; S = freshState(); demo = true;
-  curAreaKey = null; last = null; heading = null; nearby = []; lastPoiPt = null; lastGeoPt = null; narratedThisSession.clear();
+  curAreaKey = null; curRegionKeys = []; last = null; heading = null; nearby = []; lastPoiPt = null; lastGeoPt = null; narratedThisSession.clear();
   renderMarkers(); requestDraw();
   follow = true;
   unlockAudio();
@@ -621,9 +752,9 @@ function startDemo() {
 function endDemo(finished) {
   clearInterval(demoTimer); demoTimer = null;
   window.speechSynthesis?.cancel?.();
-  const summary = `Demo: ${S.areas.size} places, ${S.pois.size} sights, ${(S.meta.distM / 1000).toFixed(1)} km`;
+  const summary = `Demo: ${S.areas.size} suburbs, ${S.pois.size} sights, ${(S.meta.distM / 1000).toFixed(1)} km`;
   demo = false; S = realS || freshState(); realS = null;
-  curAreaKey = null; last = null; heading = null; nearby = []; lastPoiPt = null; lastGeoPt = null; narratedThisSession.clear();
+  curAreaKey = null; curRegionKeys = []; last = null; heading = null; nearby = []; lastPoiPt = null; lastGeoPt = null; narratedThisSession.clear();
   wakeLock?.release?.(); wakeLock = null;
   map.removeLayer(meMarker);
   renderMarkers(); requestDraw(); setExploreUI();
@@ -709,18 +840,38 @@ document.querySelectorAll('[data-close]').forEach((b) => { b.onclick = closeShee
 map.on('click', closeSheets);
 
 let tab = 'areas';
+const countLevel = (lvl) => [...S.regions.values()].filter((r) => r.level === lvl).length;
 function renderLog() {
   const km = (S.meta.distM / 1000);
   $('stats').innerHTML = [
-    [S.areas.size, 'Places'], [S.pois.size, 'Sights'], [S.photos.size, 'Photos'], [km < 100 ? km.toFixed(1) : Math.round(km), 'km'],
+    [countLevel('country'), 'Countries'], [countLevel('state'), 'States'], [S.areas.size, 'Suburbs'],
+    [S.pois.size, 'Sights'], [S.photos.size, 'Photos'], [km < 100 ? km.toFixed(1) : Math.round(km), 'km'],
   ].map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === tab));
   const body = $('tabBody');
   const chip = (ms) => { const t = tierOf(ms); return `<span class="tier" style="--c:${t.c}">${t.name}</span>`; };
   if (tab === 'areas') {
+    // Country → State → Suburb, each level with its own tier
     const list = [...S.areas.values()].sort((a, b) => b.lastSeen - a.lastSeen);
-    body.innerHTML = list.length ? list.map((a) => `<div class="item" data-lat="${a.lat}" data-lng="${a.lng}"><div class="item-main"><b>${esc(a.name)}</b><small>${esc([a.state, a.country].filter(Boolean).join(', '))} · ${fmtDur(a.ms)} · since ${fmtDate(a.firstSeen)}</small></div>${chip(a.ms)}</div>`).join('')
-      : '<div class="empty">No places yet. Tap Explore and go for a walk or drive.</div>';
+    const tree = new Map();
+    for (const a of list) {
+      const c = a.country || 'Unknown', st = a.state || '—';
+      if (!tree.has(c)) tree.set(c, new Map());
+      if (!tree.get(c).has(st)) tree.get(c).set(st, []);
+      tree.get(c).get(st).push(a);
+    }
+    const reg = (lvl, key) => S.regions.get('R|' + lvl + '|' + key.toLowerCase());
+    let html = '';
+    for (const [c, states] of tree) {
+      const cr = reg('country', c);
+      html += `<div class="group-h"><b>${esc(c)}</b>${cr ? chip(cr.ms) : ''}</div>`;
+      for (const [st, subs] of states) {
+        const sr = reg('state', st + '|' + c);
+        html += `<div class="group-h sub"><b>${esc(st)}</b>${sr ? chip(sr.ms) : ''}</div>`;
+        html += subs.map((a) => `<div class="item" data-lat="${a.lat}" data-lng="${a.lng}"><div class="item-main"><b>${esc(a.name)}</b><small>${esc(a.city || '')}${a.city ? ' · ' : ''}${fmtDur(a.ms)} · since ${fmtDate(a.firstSeen)}</small></div>${chip(a.ms)}</div>`).join('');
+      }
+    }
+    body.innerHTML = list.length ? html : '<div class="empty">No places yet. Tap Explore and go for a walk or drive.</div>';
   } else if (tab === 'pois') {
     const list = [...S.pois.values()].sort((a, b) => b.lastSeen - a.lastSeen);
     body.innerHTML = list.length ? list.map((p) => `<div class="item" data-lat="${p.lat}" data-lng="${p.lng}"><div class="item-main"><b>${esc(p.title)}</b><small>${esc(p.area || '')}${p.area ? ' · ' : ''}${fmtDate(p.firstSeen)}</small></div>${chip(p.ms)}</div>`).join('')
@@ -759,7 +910,7 @@ $('exportBtn').onclick = async () => {
   flushAll();
   const photos = [];
   for (const p of S.photos.values()) { const { blob, ...rest } = p; photos.push({ ...rest, dataUrl: blob ? await blobToDataURL(blob) : p.dataUrl }); }
-  const data = { app: 'travel-map', version: 1, exportedAt: new Date().toISOString(), cells: [...S.cells], areas: [...S.areas.values()], pois: [...S.pois.values()], photos, meta: S.meta };
+  const data = { app: 'travel-map', version: 1, exportedAt: new Date().toISOString(), cells: [...S.cells], areas: [...S.areas.values(), ...S.regions.values()], pois: [...S.pois.values()], photos, meta: S.meta };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
   a.download = `travel-map-backup-${new Date().toISOString().slice(0, 10)}.json`;
@@ -813,7 +964,21 @@ $('confirmYes').onclick = async () => {
     const [i, j] = k.split(':').map(Number);
     S.pts.push([i * CFG.cellDeg, j * CFG.cellDeg]);
   }
-  areas.forEach((a) => S.areas.set(a.key, a));
+  areas.forEach((a) => (a.key.startsWith('R|') ? S.regions : S.areas).set(a.key, a));
+  // Upgrade suburbs saved by the first version: give them levels and an unlocked circle, quietly
+  const upgraded = [];
+  for (const a of S.areas.values()) {
+    let changed = false;
+    if (!a.unlock) { a.unlock = { lat: a.lat, lng: a.lng, r: 1000 }; changed = true; }
+    for (const r of regionChain(a)) {
+      if (!S.regions.has(r.key)) {
+        const rr = { ...r, firstSeen: a.firstSeen, lastSeen: a.lastSeen, ms: 0, country: a.country, state: r.level === 'country' ? '' : a.state };
+        S.regions.set(r.key, rr); upgraded.push(rr);
+      }
+    }
+    if (changed) upgraded.push(a);
+  }
+  if (upgraded.length) dbPutMany('areas', upgraded);
   pois.forEach((p) => S.pois.set(p.id, p));
   photos.forEach((p) => S.photos.set(p.id, p));
   const m = meta.find((x) => x.k === 'meta');
